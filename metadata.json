@@ -1,0 +1,6 @@
+{
+  "name": "FolioReflow",
+  "description": "Offline scanned PDF reflow and EPUB converter inspired by k2pdfopt. Reflows multi-column scans, deskews pages, and exports e-reader PDFs and EPUBs locally.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
