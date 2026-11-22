@@ -105,6 +105,13 @@ export interface ReflowSettings {
   exportQualityDpi: number;
   bookTitle: string;
   bookAuthor: string;
+  customNamingEnabled: boolean;
+  namingPattern: string;
+  namingPrefix: string;
+  namingStartIndex: number;
+  namingIndexPadding: number;
+  epubContinuousFlow: boolean;
+  epubShowPageMarkers: boolean;
 }
 
 export const DEFAULT_SETTINGS: ReflowSettings = {
@@ -138,6 +145,13 @@ export const DEFAULT_SETTINGS: ReflowSettings = {
   exportQualityDpi: 220,
   bookTitle: '',
   bookAuthor: '',
+  customNamingEnabled: false,
+  namingPattern: '{prefix}{title}_{date}_{index}',
+  namingPrefix: '',
+  namingStartIndex: 1,
+  namingIndexPadding: 2,
+  epubContinuousFlow: true,
+  epubShowPageMarkers: false,
 };
 
 export interface Rect {

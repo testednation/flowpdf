@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useMemo, useRef } from 'react';
 import {
   CheckCircle2,
   Download,
@@ -6,10 +6,16 @@ import {
   HardDriveDownload,
   Loader2,
   Play,
+  RotateCcw,
   Settings2,
   Square,
   Trash2,
 } from 'lucide-react';
+import {
+  NAMING_PATTERN_PRESETS,
+  NAMING_TOKENS,
+  resolveExportFileName,
+} from '../engine/fileNaming';
 import {
   OCR_LANGUAGE_LABELS,
   type LocalTrainedDataPack,
@@ -44,11 +50,38 @@ interface ExportViewProps {
 }
 
 const FORMAT_LABELS: Record<OutputFormat, string> = {
-  'pdf-ocr': 'OCR Reflowable PDF (Selectable Text)',
+  'pdf-ocr': 'Reflowable PDF (OCR Text)',
+  'epub-ocr': 'Reflowable EPUB 3 (OCR Text)',
   pdf: 'Bitmap Reflow PDF (k2pdfopt)',
-  'epub-ocr': 'OCR Reflowable EPUB 3',
   'epub-bitmap': 'Offline Bitmap EPUB 3',
 };
+
+const FORMAT_OPTIONS: {
+  id: OutputFormat;
+  title: string;
+  subtitle: string;
+}[] = [
+  {
+    id: 'epub-ocr',
+    title: 'Reflowable EPUB 3',
+    subtitle: 'Dynamic fonts, chapters & figures for Kindle, Kobo, Apple Books',
+  },
+  {
+    id: 'pdf-ocr',
+    title: 'Reflowable PDF',
+    subtitle: 'Selectable vector text sized to your e-reader screen',
+  },
+  {
+    id: 'epub-bitmap',
+    title: 'Bitmap EPUB 3',
+    subtitle: '100% instant offline word strips, zero OCR typos',
+  },
+  {
+    id: 'pdf',
+    title: 'Bitmap Reflow PDF',
+    subtitle: 'k2pdfopt-style reflowed page bitmaps for math & scans',
+  },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -76,6 +109,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
   onOpenMobileSettings,
 }) => {
   const trainedDataInputRef = useRef<HTMLInputElement>(null);
+  const patternInputRef = useRef<HTMLInputElement>(null);
   const includedCount = doc.pages.filter((p) => p.included).length;
   const embeddedTextPages = doc.pages.filter((p) => p.included && p.hasEmbeddedText).length;
   const isOcrMode = settings.outputFormat === 'pdf-ocr' || settings.outputFormat === 'epub-ocr';
@@ -86,6 +120,34 @@ export const ExportView: React.FC<ExportViewProps> = ({
     progress.phase === 'packaging';
 
   const isSelectedLangCached = cachedOcrLangs.includes(settings.ocrLanguage);
+
+  const previewFileName = useMemo(
+    () =>
+      resolveExportFileName({
+        settings,
+        sourceFileName: doc.fileName,
+        selectedPageCount: includedCount,
+      }),
+    [settings, doc.fileName, includedCount]
+  );
+
+  const handleInsertToken = (token: string) => {
+    const input = patternInputRef.current;
+    const current = settings.namingPattern;
+    if (!input) {
+      onChangeSettings({ namingPattern: `${current}${token}` });
+      return;
+    }
+    const start = input.selectionStart ?? current.length;
+    const end = input.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + token + current.slice(end);
+    onChangeSettings({ namingPattern: next });
+    window.requestAnimationFrame(() => {
+      input.focus();
+      const caret = start + token.length;
+      input.setSelectionRange(caret, caret);
+    });
+  };
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto w-full space-y-6 sm:space-y-8">
@@ -112,12 +174,81 @@ export const ExportView: React.FC<ExportViewProps> = ({
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left Column: Metadata, Quality, Offline OCR Pack & Run Button */}
+        {/* Left Column: Output Format, Metadata, Quality, Offline OCR Pack & Run Button */}
         <div className="lg:col-span-6 space-y-6">
-          {/* Book Metadata */}
-          <section className="space-y-3.5">
+          {/* Output Format Selector */}
+          <section className="space-y-3">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              01. Document Metadata &amp; Quality
+              01. Output Format
+            </h2>
+            <div
+              role="radiogroup"
+              aria-label="Export output format"
+              className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+            >
+              {FORMAT_OPTIONS.map((opt) => {
+                const active = settings.outputFormat === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => onChangeSettings({ outputFormat: opt.id })}
+                    className={`text-left rounded-lg border px-3.5 py-2.5 transition-colors ${
+                      active
+                        ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40'
+                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div
+                      className={`text-xs font-semibold ${
+                        active
+                          ? 'text-blue-800 dark:text-blue-300'
+                          : 'text-slate-900 dark:text-slate-100'
+                      }`}
+                    >
+                      {opt.title}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug mt-0.5">
+                      {opt.subtitle}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {settings.outputFormat === 'epub-ocr' && (
+              <div className="pt-1 space-y-2">
+                <label className="flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={settings.epubContinuousFlow}
+                    onChange={(e) => onChangeSettings({ epubContinuousFlow: e.target.checked })}
+                    className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                  />
+                  <span>
+                    Continuous flowing text (merges scanned pages and splits chapters at detected
+                    headings)
+                  </span>
+                </label>
+                <label className="flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={settings.epubShowPageMarkers}
+                    onChange={(e) => onChangeSettings({ epubShowPageMarkers: e.target.checked })}
+                    className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                  />
+                  <span>Include visible source page headings (e.g. Page 1, Page 2)</span>
+                </label>
+              </div>
+            )}
+          </section>
+
+          {/* Book Metadata & Naming */}
+          <section className="pt-5 border-t border-slate-200 dark:border-slate-800 space-y-3.5">
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              02. Document Metadata &amp; Naming
             </h2>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -185,13 +316,207 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 })}
               </div>
             </div>
+
+            {/* Batch File Naming Pattern */}
+            <div className="pt-3 border-t border-slate-200/80 dark:border-slate-800/80 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Output File Naming
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Output file naming mode"
+                  className="grid grid-cols-2 gap-0.5 p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800"
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={!settings.customNamingEnabled}
+                    onClick={() => onChangeSettings({ customNamingEnabled: false })}
+                    className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap ${
+                      !settings.customNamingEnabled
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Automatic
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={settings.customNamingEnabled}
+                    onClick={() => onChangeSettings({ customNamingEnabled: true })}
+                    className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap ${
+                      settings.customNamingEnabled
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Custom Pattern
+                  </button>
+                </div>
+              </div>
+
+              {settings.customNamingEnabled && (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="naming-pattern"
+                        className="text-[11px] font-medium text-slate-600 dark:text-slate-400"
+                      >
+                        Filename Pattern
+                      </label>
+                      <select
+                        aria-label="Apply naming preset"
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            onChangeSettings({ namingPattern: e.target.value });
+                          }
+                        }}
+                        className="text-[11px] text-blue-700 dark:text-blue-400 bg-transparent font-medium focus:outline-none cursor-pointer"
+                      >
+                        <option value="" disabled>
+                          Load preset…
+                        </option>
+                        {NAMING_PATTERN_PRESETS.map((preset) => (
+                          <option
+                            key={preset.pattern}
+                            value={preset.pattern}
+                            className="text-slate-900 dark:text-slate-100 bg-white dark:bg-slate-900"
+                          >
+                            {preset.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <input
+                      ref={patternInputRef}
+                      id="naming-pattern"
+                      type="text"
+                      value={settings.namingPattern}
+                      onChange={(e) => onChangeSettings({ namingPattern: e.target.value })}
+                      placeholder="{prefix}{title}_{date}_{index}"
+                      className="w-full min-h-[40px] sm:min-h-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                    />
+                  </div>
+
+                  {/* Interactive Token Insertion Bar */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {NAMING_TOKENS.map((item) => (
+                      <button
+                        key={item.token}
+                        type="button"
+                        title={`${item.description} — click to insert ${item.token}`}
+                        onClick={() => handleInsertToken(item.token)}
+                        className="inline-flex min-h-[30px] sm:min-h-0 items-center rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2 py-1 font-mono text-[11px] font-medium text-slate-700 dark:text-slate-300 hover:border-blue-600/60 hover:text-blue-700 dark:hover:text-blue-400 transition-colors whitespace-nowrap"
+                      >
+                        +{item.token}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Prefix, Next Index & Padding Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label
+                        htmlFor="naming-prefix"
+                        className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1"
+                      >
+                        Prefix
+                      </label>
+                      <input
+                        id="naming-prefix"
+                        type="text"
+                        value={settings.namingPrefix}
+                        onChange={(e) => onChangeSettings({ namingPrefix: e.target.value })}
+                        placeholder="e.g. Archive_"
+                        className="w-full min-h-[38px] sm:min-h-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label
+                          htmlFor="naming-index"
+                          className="text-[11px] font-medium text-slate-600 dark:text-slate-400"
+                        >
+                          Next Index
+                        </label>
+                        {settings.namingStartIndex !== 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onChangeSettings({ namingStartIndex: 1 })}
+                            title="Reset batch counter to 1"
+                            className="inline-flex items-center gap-0.5 text-[10px] font-medium text-slate-500 hover:text-blue-700 dark:hover:text-blue-400"
+                          >
+                            <RotateCcw className="w-2.5 h-2.5" />
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        id="naming-index"
+                        type="number"
+                        min={0}
+                        max={99999}
+                        value={settings.namingStartIndex}
+                        onChange={(e) =>
+                          onChangeSettings({
+                            namingStartIndex: Math.max(0, parseInt(e.target.value, 10) || 0),
+                          })
+                        }
+                        className="w-full min-h-[38px] sm:min-h-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-xs tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="naming-padding"
+                        className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1"
+                      >
+                        Index Digits
+                      </label>
+                      <select
+                        id="naming-padding"
+                        value={settings.namingIndexPadding}
+                        onChange={(e) =>
+                          onChangeSettings({ namingIndexPadding: Number(e.target.value) })
+                        }
+                        className="w-full min-h-[38px] sm:min-h-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-xs tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      >
+                        <option value={1}>1 (1, 2, 3)</option>
+                        <option value={2}>2 (01, 02, 03)</option>
+                        <option value={3}>3 (001, 002, 003)</option>
+                        <option value={4}>4 (0001, 0002)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Live Resolved Filename Preview (clean unboxed monospace readout) */}
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium shrink-0">Next file:</span>
+                <span className="font-mono tabular-nums text-slate-900 dark:text-slate-100 break-all">
+                  {previewFileName}
+                </span>
+                {settings.customNamingEnabled && settings.namingPattern.includes('{index}') && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>Index auto-increments after each export</span>
+                  </>
+                )}
+              </div>
+            </div>
           </section>
 
           {/* Offline OCR Pack Section */}
           <section className="pt-5 border-t border-slate-200 dark:border-slate-800 space-y-3.5">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                02. Offline OCR Engine &amp; Language Pack
+                03. Offline OCR Engine &amp; Language Pack
               </h2>
               <span className="text-[11px] text-slate-500 dark:text-slate-400">
                 {isOcrMode ? 'Active for current format' : 'Optional for Bitmap modes'}
@@ -305,11 +630,13 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 >
                   <Play className="w-4 h-4" />
                   Build &amp; Download{' '}
-                  {settings.outputFormat === 'pdf-ocr'
-                    ? 'OCR Reflow PDF'
-                    : settings.outputFormat === 'pdf'
-                      ? 'Bitmap Reflow PDF'
-                      : 'EPUB 3'}
+                  {settings.outputFormat === 'epub-ocr'
+                    ? 'Reflowable EPUB 3'
+                    : settings.outputFormat === 'pdf-ocr'
+                      ? 'Reflowable PDF'
+                      : settings.outputFormat === 'epub-bitmap'
+                        ? 'Bitmap EPUB 3'
+                        : 'Bitmap Reflow PDF'}
                 </button>
               ) : (
                 <button

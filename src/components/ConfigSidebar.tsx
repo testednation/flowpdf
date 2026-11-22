@@ -68,9 +68,9 @@ export const ConfigSidebar: React.FC<ConfigSidebarProps> = ({
   };
 
   const formats: { id: OutputFormat; label: string }[] = [
-    { id: 'pdf-ocr', label: 'OCR Reflow PDF' },
+    { id: 'pdf-ocr', label: 'Reflow PDF' },
+    { id: 'epub-ocr', label: 'Reflow EPUB' },
     { id: 'pdf', label: 'Bitmap PDF' },
-    { id: 'epub-ocr', label: 'OCR EPUB' },
     { id: 'epub-bitmap', label: 'Bitmap EPUB' },
   ];
 
@@ -365,7 +365,7 @@ export const ConfigSidebar: React.FC<ConfigSidebarProps> = ({
               display={`${settings.contrast.toFixed(2)}×`}
               onChange={(v) => onChange({ contrast: v })}
             />
-            {settings.outputFormat === 'pdf-ocr' ? (
+            {isOcrMode ? (
               <>
                 <div className="space-y-1.5">
                   <span className="block text-xs font-medium text-slate-600 dark:text-slate-400">

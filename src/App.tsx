@@ -23,6 +23,7 @@ import {
   type OcrPreviewPage,
   renderOcrPdfPreviewPages,
 } from './engine/exporters';
+import { resolveExportFileName } from './engine/fileNaming';
 import {
   detectSmartPageOrientation,
   enhanceScannedCanvas,
@@ -983,18 +984,11 @@ export default function App() {
     sourcePagesProcessed: number,
     outputPages: number
   ) => {
-    const safeBase = (settings.bookTitle || doc?.fileName.replace(/\.pdf$/i, '') || 'reflowed')
-      .replace(/[^a-z0-9\-_\s]/gi, '')
-      .trim()
-      .replace(/\s+/g, '_')
-      .slice(0, 64);
-    const suffixMap: Record<ReflowSettings['outputFormat'], string> = {
-      'pdf-ocr': 'ocr_reflow',
-      pdf: 'bitmap_reflow',
-      'epub-ocr': 'ocr',
-      'epub-bitmap': 'bitmap',
-    };
-    const outFileName = `${safeBase || 'document'}_${suffixMap[settings.outputFormat]}.${ext}`;
+    const outFileName = resolveExportFileName({
+      settings,
+      sourceFileName: doc?.fileName || 'reflowed.pdf',
+      selectedPageCount: sourcePagesProcessed,
+    });
     const url = URL.createObjectURL(blob);
 
     const a = document.createElement('a');
@@ -1003,6 +997,14 @@ export default function App() {
     document.body.appendChild(a);
     a.click();
     a.remove();
+
+    // Auto-increment the batch counter when custom naming uses {index}
+    if (settings.customNamingEnabled && settings.namingPattern.includes('{index}')) {
+      setSettings((prev) => ({
+        ...prev,
+        namingStartIndex: (prev.namingStartIndex ?? 1) + 1,
+      }));
+    }
 
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

@@ -499,9 +499,18 @@ export async function buildBitmapEpubBlob(
   });
 }
 
+const OCR_TO_ISO_LANG: Record<ReflowSettings['ocrLanguage'], string> = {
+  eng: 'en',
+  deu: 'de',
+  fra: 'fr',
+  spa: 'es',
+  ita: 'it',
+};
+
 /**
  * Builds a truly reflowable semantic text EPUB 3.0 from extracted OCR / embedded text
- * plus preserved raster figures, allowing full e-reader font resizing and highlights.
+ * plus preserved raster figures, allowing full e-reader font resizing, dark mode,
+ * dictionary lookup, and highlights.
  */
 export async function buildTextEpubBlob(
   chapters: OcrChapterContent[],
@@ -512,11 +521,12 @@ export async function buildTextEpubBlob(
   const bookId = `urn:uuid:${generateUuid()}`;
   const title = settings.bookTitle.trim() || 'Reflowed Document';
   const author = settings.bookAuthor.trim() || 'Unknown Author';
+  const lang = OCR_TO_ISO_LANG[settings.ocrLanguage] || 'en';
   const modified = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 
   zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
   zip.file('META-INF/container.xml', buildContainerXml());
-  zip.file('OEBPS/styles.css', buildEpubStylesCss(false));
+  zip.file('OEBPS/styles.css', buildEpubStylesCss(false, settings));
 
   const manifestItems: string[] = [
     `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>`,
@@ -528,23 +538,45 @@ export async function buildTextEpubBlob(
 
   let figCounter = 0;
 
-  for (let i = 0; i < chapters.length; i++) {
-    const ch = chapters[i];
-    const chapId = `sec_${String(ch.sourcePage).padStart(4, '0')}`;
-    const chapHref = `${chapId}.xhtml`;
-    const label = `Source Page ${ch.sourcePage}`;
+  if (settings.epubContinuousFlow) {
+    // Group scanned pages into seamless flowing chapters split on detected headings
+    interface FlowSection {
+      title: string;
+      parts: string[];
+    }
+    const sections: FlowSection[] = [];
+    let currentSection: FlowSection = {
+      title: title,
+      parts: [`<h1 class="book-title">${escapeXml(title)}</h1>`],
+    };
 
-    const parts: string[] = [`<h2 class="page-marker">Page ${ch.sourcePage}</h2>`];
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      const pageBreakId = `page_${ch.sourcePage}`;
+      currentSection.parts.push(
+        `<span id="${pageBreakId}" epub:type="pagebreak" role="doc-pagebreak" aria-label="Page ${ch.sourcePage}"></span>`
+      );
+      if (settings.epubShowPageMarkers) {
+        currentSection.parts.push(`<h2 class="page-marker">Page ${ch.sourcePage}</h2>`);
+      }
 
-    if (ch.paragraphs.length === 0 && ch.figures.length === 0) {
-      parts.push(`<p class="empty-note">[No readable text detected on page ${ch.sourcePage}]</p>`);
-    } else {
-      for (const p of ch.paragraphs) {
-        // Short uppercase or chapter-like standalone lines become subheadings
-        if (p.length < 72 && !p.endsWith('.') && /^[A-Z0-9\s:–—-]+$/.test(p)) {
-          parts.push(`<h3>${escapeXml(p)}</h3>`);
+      for (const rawP of ch.paragraphs) {
+        const p = rawP.trim();
+        if (!p) continue;
+        if (isHeadingParagraph(p)) {
+          // Start a fresh navigable chapter when a heading appears after existing body prose
+          if (currentSection.parts.length > 3) {
+            sections.push(currentSection);
+            currentSection = {
+              title: p,
+              parts: [`<h2>${escapeXml(p)}</h2>`],
+            };
+          } else {
+            currentSection.title = p;
+            currentSection.parts.push(`<h2>${escapeXml(p)}</h2>`);
+          }
         } else {
-          parts.push(`<p>${escapeXml(p)}</p>`);
+          currentSection.parts.push(`<p>${escapeXml(p)}</p>`);
         }
       }
 
@@ -554,27 +586,87 @@ export async function buildTextEpubBlob(
         const imgHref = `images/${imgId}.png`;
         zip.file(`OEBPS/${imgHref}`, dataUrlToUint8Array(fig.dataUrl), { binary: true });
         manifestItems.push(`<item id="${imgId}" href="${imgHref}" media-type="image/png"/>`);
-        parts.push(
+        currentSection.parts.push(
           `<figure class="scanned-figure"><img src="${imgHref}" alt="Diagram from page ${ch.sourcePage}" /></figure>`
         );
       }
+
+      if (onProgress) onProgress(i + 1, chapters.length);
     }
 
-    zip.file(`OEBPS/${chapHref}`, buildChapterXhtml(label, parts.join('\n      ')));
-    manifestItems.push(
-      `<item id="${chapId}" href="${chapHref}" media-type="application/xhtml+xml"/>`
-    );
-    spineItems.push(`<itemref idref="${chapId}"/>`);
-    navEntries.push({ id: chapId, href: chapHref, label });
+    sections.push(currentSection);
 
-    if (onProgress) onProgress(i + 1, chapters.length);
+    sections.forEach((sec, idx) => {
+      const chapId = `chap_${String(idx + 1).padStart(4, '0')}`;
+      const chapHref = `${chapId}.xhtml`;
+      zip.file(`OEBPS/${chapHref}`, buildChapterXhtml(sec.title, sec.parts.join('\n      '), lang));
+      manifestItems.push(
+        `<item id="${chapId}" href="${chapHref}" media-type="application/xhtml+xml"/>`
+      );
+      spineItems.push(`<itemref idref="${chapId}"/>`);
+      navEntries.push({ id: chapId, href: chapHref, label: sec.title });
+    });
+  } else {
+    // Page-per-section reflowable EPUB (preserves explicit source page boundaries)
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      const chapId = `sec_${String(ch.sourcePage).padStart(4, '0')}`;
+      const chapHref = `${chapId}.xhtml`;
+      const firstHeading = ch.paragraphs.find((p) => isHeadingParagraph(p.trim()));
+      const label = firstHeading
+        ? `${firstHeading.trim().slice(0, 52)} (p.${ch.sourcePage})`
+        : `Page ${ch.sourcePage}`;
+
+      const parts: string[] = [];
+      if (settings.epubShowPageMarkers) {
+        parts.push(`<h2 class="page-marker">Page ${ch.sourcePage}</h2>`);
+      } else {
+        parts.push(
+          `<span id="page_${ch.sourcePage}" epub:type="pagebreak" role="doc-pagebreak" aria-label="Page ${ch.sourcePage}"></span>`
+        );
+      }
+
+      if (ch.paragraphs.length === 0 && ch.figures.length === 0) {
+        parts.push(`<p class="empty-note">[No readable text detected on page ${ch.sourcePage}]</p>`);
+      } else {
+        for (const rawP of ch.paragraphs) {
+          const p = rawP.trim();
+          if (!p) continue;
+          if (isHeadingParagraph(p)) {
+            parts.push(`<h3>${escapeXml(p)}</h3>`);
+          } else {
+            parts.push(`<p>${escapeXml(p)}</p>`);
+          }
+        }
+
+        for (const fig of ch.figures) {
+          figCounter++;
+          const imgId = `fig_${String(figCounter).padStart(4, '0')}`;
+          const imgHref = `images/${imgId}.png`;
+          zip.file(`OEBPS/${imgHref}`, dataUrlToUint8Array(fig.dataUrl), { binary: true });
+          manifestItems.push(`<item id="${imgId}" href="${imgHref}" media-type="image/png"/>`);
+          parts.push(
+            `<figure class="scanned-figure"><img src="${imgHref}" alt="Diagram from page ${ch.sourcePage}" /></figure>`
+          );
+        }
+      }
+
+      zip.file(`OEBPS/${chapHref}`, buildChapterXhtml(label, parts.join('\n      '), lang));
+      manifestItems.push(
+        `<item id="${chapId}" href="${chapHref}" media-type="application/xhtml+xml"/>`
+      );
+      spineItems.push(`<itemref idref="${chapId}"/>`);
+      navEntries.push({ id: chapId, href: chapHref, label });
+
+      if (onProgress) onProgress(i + 1, chapters.length);
+    }
   }
 
-  zip.file('OEBPS/nav.xhtml', buildNavXhtml(title, navEntries));
+  zip.file('OEBPS/nav.xhtml', buildNavXhtml(title, navEntries, lang));
   zip.file('OEBPS/toc.ncx', buildTocNcx(bookId, title, navEntries));
   zip.file(
     'OEBPS/content.opf',
-    buildContentOpf(bookId, title, author, modified, manifestItems, spineItems)
+    buildContentOpf(bookId, title, author, modified, manifestItems, spineItems, lang)
   );
 
   return zip.generateAsync({
@@ -594,7 +686,7 @@ function buildContainerXml(): string {
 </container>`;
 }
 
-function buildEpubStylesCss(isBitmapMode: boolean): string {
+function buildEpubStylesCss(isBitmapMode: boolean, settings?: ReflowSettings): string {
   if (isBitmapMode) {
     return `body {
   margin: 0.6em;
@@ -624,10 +716,29 @@ function buildEpubStylesCss(isBitmapMode: boolean): string {
 }`;
   }
 
+  const fontStack =
+    settings?.ocrFontFamily === 'sans'
+      ? '-apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif'
+      : 'Georgia, "Times New Roman", serif';
+  const lineHeight = settings ? Math.max(1.2, Math.min(2.0, settings.lineSpacing)).toFixed(2) : '1.55';
+  const indent = settings?.preserveParagraphIndent === false ? '0' : '1.25em';
+
   return `body {
-  font-family: Georgia, "Times New Roman", serif;
-  line-height: 1.55;
+  font-family: ${fontStack};
+  line-height: ${lineHeight};
   margin: 1em 1.2em;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+}
+h1.book-title {
+  font-size: 1.45em;
+  line-height: 1.25;
+  margin: 0.4em 0 1em 0;
+}
+h2 {
+  font-size: 1.25em;
+  line-height: 1.3;
+  margin: 1.3em 0 0.6em 0;
 }
 h2.page-marker {
   font-family: sans-serif;
@@ -639,20 +750,27 @@ h2.page-marker {
   margin: 1.4em 0 0.8em 0;
 }
 h3 {
-  font-size: 1.15em;
+  font-size: 1.12em;
+  line-height: 1.3;
   margin: 1.2em 0 0.5em 0;
 }
 p {
-  margin: 0 0 0.75em 0;
-  text-indent: 1.2em;
+  margin: 0 0 0.7em 0;
+  text-indent: ${indent};
   text-align: justify;
 }
-p:first-of-type {
+h1 + p, h2 + p, h3 + p, p:first-of-type {
+  text-indent: 0;
+}
+.empty-note {
+  font-style: italic;
+  color: #64748b;
   text-indent: 0;
 }
 .scanned-figure {
   margin: 1.2em auto;
   text-align: center;
+  page-break-inside: avoid;
 }
 .scanned-figure img {
   max-width: 100%;
@@ -660,10 +778,10 @@ p:first-of-type {
 }`;
 }
 
-function buildChapterXhtml(title: string, innerHtml: string): string {
+function buildChapterXhtml(title: string, innerHtml: string, lang = 'en'): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(lang)}" lang="${escapeXml(lang)}">
   <head>
     <meta charset="UTF-8" />
     <title>${escapeXml(title)}</title>
@@ -679,14 +797,15 @@ function buildChapterXhtml(title: string, innerHtml: string): string {
 
 function buildNavXhtml(
   title: string,
-  entries: { id: string; href: string; label: string }[]
+  entries: { id: string; href: string; label: string }[],
+  lang = 'en'
 ): string {
   const listItems = entries
     .map((e) => `        <li><a href="${e.href}">${escapeXml(e.label)}</a></li>`)
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(lang)}" lang="${escapeXml(lang)}">
   <head>
     <meta charset="UTF-8" />
     <title>${escapeXml(title)} — Contents</title>
@@ -736,16 +855,19 @@ function buildContentOpf(
   author: string,
   modified: string,
   manifestItems: string[],
-  spineItems: string[]
+  spineItems: string[],
+  lang = 'en'
 ): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+<package xmlns="http://www.idpf.org/opf" version="3.0" unique-identifier="BookId" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="BookId">${escapeXml(bookId)}</dc:identifier>
     <dc:title>${escapeXml(title)}</dc:title>
     <dc:creator>${escapeXml(author)}</dc:creator>
-    <dc:language>en</dc:language>
+    <dc:language>${escapeXml(lang)}</dc:language>
     <meta property="dcterms:modified">${modified}</meta>
+    <meta property="rendition:layout">reflowable</meta>
+    <meta property="rendition:flow">auto</meta>
   </metadata>
   <manifest>
     ${manifestItems.join('\n    ')}

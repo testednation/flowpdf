@@ -744,7 +744,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
                   {settings.outputFormat === 'pdf-ocr'
                     ? 'Live OCR Reflow PDF'
                     : settings.outputFormat === 'epub-ocr'
-                      ? 'Live OCR EPUB 3'
+                      ? 'Live Reflowable EPUB 3'
                       : settings.outputFormat === 'epub-bitmap'
                         ? 'Live Bitmap EPUB 3'
                         : 'Live Bitmap Reflow PDF'}
@@ -917,13 +917,20 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
                     }}
                   >
                     <div className="flex items-center justify-between border-b border-current/15 pb-2 font-sans text-[11px] opacity-60">
-                      <span>Source Page {ocrPreview.sourcePage}</span>
+                      <span>
+                        {settings.epubContinuousFlow ? 'Reflowable EPUB 3 · Continuous' : `Section · Page ${ocrPreview.sourcePage}`}
+                      </span>
                       <span>
                         {ocrPreview.usedEmbeddedText
                           ? 'Embedded Text'
                           : `OCR · ${ocrPreview.meanConfidence}% conf`}
                       </span>
                     </div>
+                    {settings.epubShowPageMarkers && (
+                      <h2 className="font-sans text-[11px] uppercase tracking-wider opacity-60 pt-1">
+                        Page {ocrPreview.sourcePage}
+                      </h2>
+                    )}
                     {ocrPreview.paragraphs.length > 0 ? (
                       ocrPreview.paragraphs.map((p, idx) => (
                         <p
