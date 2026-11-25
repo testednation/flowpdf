@@ -236,15 +236,26 @@ export interface LoadedDocument {
   isSample: boolean;
 }
 
+export interface ExportBatchStats {
+  totalWords: number;
+  estimatedReadingMinutes: number;
+  figuresExtracted: number;
+  elapsedMs: number;
+  wordCountBasis: 'ocr-text' | 'bitmap-tokens';
+  meanOcrConfidence?: number;
+}
+
 export interface ExportHistoryItem {
   id: string;
   fileName: string;
   format: OutputFormat;
   createdAt: string;
+  createdAtIso?: string;
   sourcePagesProcessed: number;
   outputPages: number;
   fileSizeBytes: number;
   downloadUrl: string;
+  stats: ExportBatchStats;
 }
 
 export interface ConversionProgress {

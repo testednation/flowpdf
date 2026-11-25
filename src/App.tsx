@@ -44,6 +44,7 @@ import { generateSampleScannedPdf } from './engine/samplePdfGenerator';
 import {
   type ConversionProgress,
   DEFAULT_SETTINGS,
+  type ExportBatchStats,
   type ExportHistoryItem,
   type LoadedDocument,
   type OcrChapterContent,
@@ -131,6 +132,7 @@ export default function App() {
     detail: '',
   });
   const [history, setHistory] = useState<ExportHistoryItem[]>([]);
+  const [activeSummaryId, setActiveSummaryId] = useState<string | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [shortcutFeedback, setShortcutFeedback] = useState<string | null>(null);
   const [isSmartRotatingAll, setIsSmartRotatingAll] = useState(false);
@@ -225,6 +227,7 @@ export default function App() {
         bookTitle: fileName.replace(/\.pdf$/i, ''),
       }));
       setProgress({ phase: 'idle', currentPage: 0, totalPages: 0, percent: 0, detail: '' });
+      setActiveSummaryId(null);
 
       // Lazily render page thumbnails in the background without blocking preview
       void (async () => {
@@ -722,6 +725,7 @@ export default function App() {
     if (selectedPages.length === 0) return;
 
     abortExportRef.current = false;
+    const exportStartTime = performance.now();
     const total = selectedPages.length;
     const exportDpi = settings.exportQualityDpi;
     const isOcrFormat = settings.outputFormat === 'pdf-ocr' || settings.outputFormat === 'epub-ocr';
@@ -845,6 +849,32 @@ export default function App() {
           await new Promise((r) => setTimeout(r, 0));
         }
 
+        const totalWords = chapters.reduce((sum, ch) => {
+          const paraWords = ch.paragraphs
+            .join(' ')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean).length;
+          return sum + (paraWords > 0 ? paraWords : ch.wordCount);
+        }, 0);
+        const figuresExtracted = chapters.reduce((sum, ch) => sum + ch.figures.length, 0);
+        const ocrOnlyChapters = chapters.filter((ch) => !ch.usedEmbeddedText && ch.wordCount > 0);
+        const meanOcrConfidence =
+          ocrOnlyChapters.length > 0
+            ? Math.round(
+                ocrOnlyChapters.reduce((sum, ch) => sum + ch.meanConfidence, 0) /
+                  ocrOnlyChapters.length
+              )
+            : undefined;
+        const ocrStats: ExportBatchStats = {
+          totalWords,
+          estimatedReadingMinutes: Number((totalWords / 238).toFixed(2)),
+          figuresExtracted,
+          elapsedMs: Math.max(1, Math.round(performance.now() - exportStartTime)),
+          wordCountBasis: 'ocr-text',
+          meanOcrConfidence,
+        };
+
         if (settings.outputFormat === 'pdf-ocr') {
           setProgress({
             phase: 'packaging',
@@ -854,7 +884,8 @@ export default function App() {
             detail: `Typesetting reflowable vector PDF (${settings.targetWidthMm}×${settings.targetHeightMm} mm)…`,
           });
           const { blob, outputPageCount } = await buildOcrReflowPdfBlob(chapters, settings);
-          finishExport(blob, 'pdf', total, outputPageCount);
+          ocrStats.elapsedMs = Math.max(1, Math.round(performance.now() - exportStartTime));
+          finishExport(blob, 'pdf', total, outputPageCount, ocrStats);
         } else {
           setProgress({
             phase: 'packaging',
@@ -864,7 +895,8 @@ export default function App() {
             detail: 'Packaging reflowable EPUB 3 archive…',
           });
           const blob = await buildTextEpubBlob(chapters, settings);
-          finishExport(blob, 'epub', total, chapters.length);
+          ocrStats.elapsedMs = Math.max(1, Math.round(performance.now() - exportStartTime));
+          finishExport(blob, 'epub', total, chapters.length, ocrStats);
         }
       } else {
         // Bitmap Reflow PDF or Offline Bitmap EPUB 3
@@ -959,11 +991,22 @@ export default function App() {
                 });
               });
 
+        const bitmapWords = reflowedPages.reduce((sum, p) => sum + p.wordCount, 0);
+        const bitmapFigures = reflowedPages.reduce((sum, p) => sum + p.figureCount, 0);
+        const bitmapStats: ExportBatchStats = {
+          totalWords: bitmapWords,
+          estimatedReadingMinutes: Number((bitmapWords / 238).toFixed(2)),
+          figuresExtracted: bitmapFigures,
+          elapsedMs: Math.max(1, Math.round(performance.now() - exportStartTime)),
+          wordCountBasis: 'bitmap-tokens',
+        };
+
         finishExport(
           blob,
           settings.outputFormat === 'pdf' ? 'pdf' : 'epub',
           total,
-          reflowedPages.length
+          reflowedPages.length,
+          bitmapStats
         );
       }
     } catch (err) {
@@ -982,7 +1025,8 @@ export default function App() {
     blob: Blob,
     ext: 'pdf' | 'epub',
     sourcePagesProcessed: number,
-    outputPages: number
+    outputPages: number,
+    stats: ExportBatchStats
   ) => {
     const outFileName = resolveExportFileName({
       settings,
@@ -1008,20 +1052,24 @@ export default function App() {
 
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const itemId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     setHistory((prev) => [
       {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: itemId,
         fileName: outFileName,
         format: settings.outputFormat,
         createdAt: timeLabel,
+        createdAtIso: now.toISOString(),
         sourcePagesProcessed,
         outputPages,
         fileSizeBytes: blob.size,
         downloadUrl: url,
+        stats,
       },
       ...prev,
     ]);
+    setActiveSummaryId(itemId);
 
     setProgress({
       phase: 'done',
@@ -1037,6 +1085,7 @@ export default function App() {
       prev.forEach((item) => URL.revokeObjectURL(item.downloadUrl));
       return [];
     });
+    setActiveSummaryId(null);
   }, []);
 
   // Global keyboard shortcuts (arrows for page navigation, Ctrl/Cmd+E for export, Ctrl/Cmd+O for open, ? for help)
@@ -1316,6 +1365,9 @@ export default function App() {
               }}
               history={history}
               onClearHistory={handleClearHistory}
+              activeSummaryId={activeSummaryId}
+              onSelectSummary={setActiveSummaryId}
+              onDismissSummary={() => setActiveSummaryId(null)}
               cachedOcrLangs={cachedOcrLangs}
               isCachingOcr={isCachingOcr}
               ocrCacheStatus={ocrCacheStatus}

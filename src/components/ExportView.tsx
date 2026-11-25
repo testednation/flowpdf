@@ -1,7 +1,9 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
   CheckCircle2,
   Download,
+  FileJson,
   FolderOpen,
   HardDriveDownload,
   Loader2,
@@ -10,6 +12,7 @@ import {
   Settings2,
   Square,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   NAMING_PATTERN_PRESETS,
@@ -38,6 +41,9 @@ interface ExportViewProps {
   onCancelExport: () => void;
   history: ExportHistoryItem[];
   onClearHistory: () => void;
+  activeSummaryId: string | null;
+  onSelectSummary: (id: string) => void;
+  onDismissSummary: () => void;
   cachedOcrLangs: OcrLanguage[];
   isCachingOcr: boolean;
   ocrCacheStatus: string;
@@ -89,6 +95,25 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function formatReadingTime(totalWords: number): string {
+  if (totalWords <= 0) return '0 min';
+  const exactMinutes = totalWords / 238;
+  if (exactMinutes < 1) return '< 1 min';
+  const roundedMinutes = Math.round(exactMinutes);
+  if (roundedMinutes < 60) return `${roundedMinutes} min`;
+  const hours = Math.floor(roundedMinutes / 60);
+  const mins = roundedMinutes % 60;
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60_000);
+  const secs = Math.round((ms % 60_000) / 1000);
+  return `${mins}m ${secs}s`;
+}
+
 export const ExportView: React.FC<ExportViewProps> = ({
   doc,
   settings,
@@ -98,6 +123,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
   onCancelExport,
   history,
   onClearHistory,
+  activeSummaryId,
+  onSelectSummary,
+  onDismissSummary,
   cachedOcrLangs,
   isCachingOcr,
   ocrCacheStatus,
@@ -110,6 +138,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
 }) => {
   const trainedDataInputRef = useRef<HTMLInputElement>(null);
   const patternInputRef = useRef<HTMLInputElement>(null);
+  const summaryRef = useRef<HTMLElement>(null);
+  const jsonFeedbackTimerRef = useRef<number | null>(null);
+  const [jsonExported, setJsonExported] = useState(false);
   const includedCount = doc.pages.filter((p) => p.included).length;
   const embeddedTextPages = doc.pages.filter((p) => p.included && p.hasEmbeddedText).length;
   const isOcrMode = settings.outputFormat === 'pdf-ocr' || settings.outputFormat === 'epub-ocr';
@@ -120,6 +151,32 @@ export const ExportView: React.FC<ExportViewProps> = ({
     progress.phase === 'packaging';
 
   const isSelectedLangCached = cachedOcrLangs.includes(settings.ocrLanguage);
+
+  const activeSummary = useMemo(
+    () => (activeSummaryId ? history.find((item) => item.id === activeSummaryId) ?? null : null),
+    [activeSummaryId, history]
+  );
+
+  const isLatestSummary = Boolean(activeSummary && history[0]?.id === activeSummary.id);
+
+  useEffect(() => {
+    if (!activeSummaryId || !summaryRef.current) return;
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    summaryRef.current.scrollIntoView({
+      behavior: prefersReduced ? 'auto' : 'smooth',
+      block: 'nearest',
+    });
+  }, [activeSummaryId]);
+
+  useEffect(() => {
+    return () => {
+      if (jsonFeedbackTimerRef.current) {
+        window.clearTimeout(jsonFeedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   const previewFileName = useMemo(
     () =>
@@ -149,6 +206,68 @@ export const ExportView: React.FC<ExportViewProps> = ({
     });
   };
 
+  const handleExportHistoryJson = () => {
+    if (history.length === 0) return;
+
+    const now = new Date();
+    const totalWords = history.reduce((sum, item) => sum + item.stats.totalWords, 0);
+    const archivePayload = {
+      schemaVersion: 1,
+      exportedAt: now.toISOString(),
+      sourceDocument: {
+        fileName: doc.fileName,
+        fileSizeBytes: doc.fileSizeBytes,
+        pageCount: doc.pageCount,
+        isSample: doc.isSample,
+      },
+      totals: {
+        exportsCount: history.length,
+        totalSourcePagesProcessed: history.reduce((sum, item) => sum + item.sourcePagesProcessed, 0),
+        totalOutputPages: history.reduce((sum, item) => sum + item.outputPages, 0),
+        totalWords,
+        estimatedReadingMinutes: Number((totalWords / 238).toFixed(2)),
+        totalFiguresExtracted: history.reduce((sum, item) => sum + item.stats.figuresExtracted, 0),
+        totalFileSizeBytes: history.reduce((sum, item) => sum + item.fileSizeBytes, 0),
+      },
+      history: history.map(({ downloadUrl: _blobUrl, ...entry }) => ({
+        ...entry,
+        formatLabel: FORMAT_LABELS[entry.format],
+        stats: {
+          ...entry.stats,
+          formattedReadingTime: formatReadingTime(entry.stats.totalWords),
+        },
+      })),
+    };
+
+    const baseName =
+      doc.fileName
+        .replace(/\.pdf$/i, '')
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'document';
+    const dateStamp = now.toISOString().slice(0, 10);
+    const jsonFileName = `${baseName}-export-history-${dateStamp}.json`;
+
+    const blob = new Blob([JSON.stringify(archivePayload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = jsonFileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    setJsonExported(true);
+    if (jsonFeedbackTimerRef.current) {
+      window.clearTimeout(jsonFeedbackTimerRef.current);
+    }
+    jsonFeedbackTimerRef.current = window.setTimeout(() => {
+      setJsonExported(false);
+    }, 1800);
+  };
+
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto w-full space-y-6 sm:space-y-8">
       <div className="pb-4 sm:pb-5 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3">
@@ -172,6 +291,129 @@ export const ExportView: React.FC<ExportViewProps> = ({
           </button>
         )}
       </div>
+
+      {/* Export Completion Summary View */}
+      {activeSummary && (
+        <section
+          ref={summaryRef}
+          aria-label="Export completion summary"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+        >
+          <div className="px-4 sm:px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <h2 className="font-display text-base font-semibold text-slate-900 dark:text-slate-100">
+                  {isLatestSummary ? 'Export Complete' : 'Export Summary'}
+                </h2>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+                <span className="font-mono text-slate-800 dark:text-slate-200 break-all">
+                  {activeSummary.fileName}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>{FORMAT_LABELS[activeSummary.format]}</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {activeSummary.sourcePagesProcessed}→{activeSummary.outputPages}{' '}
+                  {activeSummary.format === 'epub-ocr' || activeSummary.format === 'epub-bitmap'
+                    ? 'sections'
+                    : 'pages'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {formatBytes(activeSummary.fileSizeBytes)}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {formatDuration(activeSummary.stats.elapsedMs)}
+                </span>
+                {activeSummary.stats.meanOcrConfidence !== undefined && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">
+                      {activeSummary.stats.meanOcrConfidence}% avg OCR conf
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={activeSummary.downloadUrl}
+                download={activeSummary.fileName}
+                className="inline-flex min-h-[40px] sm:min-h-0 items-center justify-center gap-1.5 rounded-lg bg-blue-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-800 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download{' '}
+                {activeSummary.format === 'epub-ocr' || activeSummary.format === 'epub-bitmap'
+                  ? 'EPUB'
+                  : 'PDF'}
+              </a>
+              <button
+                type="button"
+                onClick={onDismissSummary}
+                aria-label="Dismiss export summary"
+                className="inline-flex min-h-[40px] min-w-[40px] sm:min-h-0 sm:min-w-0 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 p-2 text-slate-500 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* 3-Column Batch Metrics Strip */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-slate-800 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/30">
+            <div className="px-4 sm:px-6 py-4 space-y-1">
+              <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Total Words Processed
+              </div>
+              <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums tracking-tight text-slate-900 dark:text-slate-100">
+                {activeSummary.stats.totalWords.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                {activeSummary.sourcePagesProcessed > 0
+                  ? `~${Math.round(
+                      activeSummary.stats.totalWords / activeSummary.sourcePagesProcessed
+                    ).toLocaleString()} words/page · `
+                  : ''}
+                {activeSummary.stats.wordCountBasis === 'ocr-text'
+                  ? 'Extracted text'
+                  : 'Segmented tokens'}
+              </div>
+            </div>
+
+            <div className="px-4 sm:px-6 py-4 space-y-1">
+              <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Estimated Reading Time
+              </div>
+              <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums tracking-tight text-slate-900 dark:text-slate-100">
+                {formatReadingTime(activeSummary.stats.totalWords)}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                For generated{' '}
+                {activeSummary.format === 'epub-ocr' || activeSummary.format === 'epub-bitmap'
+                  ? 'EPUB 3'
+                  : 'PDF'}{' '}
+                · 238 wpm average
+              </div>
+            </div>
+
+            <div className="px-4 sm:px-6 py-4 space-y-1">
+              <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Figures Extracted
+              </div>
+              <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums tracking-tight text-slate-900 dark:text-slate-100">
+                {activeSummary.stats.figuresExtracted.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                Across {activeSummary.sourcePagesProcessed} source{' '}
+                {activeSummary.sourcePagesProcessed === 1 ? 'page' : 'pages'} in batch
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Column: Output Format, Metadata, Quality, Offline OCR Pack & Run Button */}
@@ -688,19 +930,34 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
         {/* Right Column: Export History Table */}
         <div className="lg:col-span-6 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
               Session Exports
             </h2>
             {history.length > 0 && (
-              <button
-                type="button"
-                onClick={onClearHistory}
-                className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-red-600 dark:hover:text-red-400 transition-colors"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Clear
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleExportHistoryJson}
+                  title="Download session export history, metadata, and stats as JSON"
+                  className="inline-flex min-h-[34px] sm:min-h-0 items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  {jsonExported ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  ) : (
+                    <FileJson className="w-3.5 h-3.5" />
+                  )}
+                  {jsonExported ? 'Exported JSON' : 'Export JSON'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onClearHistory}
+                  className="inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 px-1.5 py-1 text-xs text-slate-500 hover:text-red-600 dark:hover:text-red-400 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Clear
+                </button>
+              </div>
             )}
           </div>
 
@@ -718,27 +975,45 @@ export const ExportView: React.FC<ExportViewProps> = ({
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
               {/* Mobile Stacked Export List */}
               <div className="sm:hidden divide-y divide-slate-200 dark:divide-slate-800">
-                {history.map((item) => (
-                  <div key={item.id} className="p-3.5 flex items-center justify-between gap-3">
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                        {item.fileName}
-                      </div>
-                      <div className="font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
-                        {item.sourcePagesProcessed}→{item.outputPages} pgs ·{' '}
-                        {formatBytes(item.fileSizeBytes)} · {item.createdAt}
-                      </div>
-                    </div>
-                    <a
-                      href={item.downloadUrl}
-                      download={item.fileName}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                {history.map((item) => {
+                  const isSelected = activeSummaryId === item.id;
+                  return (
+                    <div
+                      key={item.id}
+                      className={`p-3.5 flex items-center justify-between gap-3 ${
+                        isSelected ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''
+                      }`}
                     >
-                      <Download className="w-3.5 h-3.5" />
-                      Save
-                    </a>
-                  </div>
-                ))}
+                      <button
+                        type="button"
+                        onClick={() => onSelectSummary(item.id)}
+                        className="min-w-0 flex-1 text-left space-y-0.5"
+                      >
+                        <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {item.fileName}
+                        </div>
+                        <div className="font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                          {item.sourcePagesProcessed}→{item.outputPages} pgs ·{' '}
+                          {formatBytes(item.fileSizeBytes)} · {item.createdAt}
+                        </div>
+                        <div className="font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                          {item.stats.totalWords.toLocaleString()} words ·{' '}
+                          {formatReadingTime(item.stats.totalWords)} ·{' '}
+                          {item.stats.figuresExtracted}{' '}
+                          {item.stats.figuresExtracted === 1 ? 'fig' : 'figs'}
+                        </div>
+                      </button>
+                      <a
+                        href={item.downloadUrl}
+                        download={item.fileName}
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Save
+                      </a>
+                    </div>
+                  );
+                })}
               </div>
 
               {/* Desktop Tabular Export History */}
@@ -753,37 +1028,68 @@ export const ExportView: React.FC<ExportViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                    {history.map((item) => (
-                      <tr
-                        key={item.id}
-                        className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
-                      >
-                        <td className="py-3 px-3.5">
-                          <div className="font-medium text-slate-900 dark:text-slate-100 truncate max-w-[200px]">
-                            {item.fileName}
-                          </div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                            {FORMAT_LABELS[item.format]} · {item.createdAt}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                          {item.sourcePagesProcessed}→{item.outputPages}
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                          {formatBytes(item.fileSizeBytes)}
-                        </td>
-                        <td className="py-3 px-3.5 text-right">
-                          <a
-                            href={item.downloadUrl}
-                            download={item.fileName}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
-                          >
-                            <Download className="w-3 h-3" />
-                            Save
-                          </a>
-                        </td>
-                      </tr>
-                    ))}
+                    {history.map((item) => {
+                      const isSelected = activeSummaryId === item.id;
+                      return (
+                        <tr
+                          key={item.id}
+                          className={`transition-colors ${
+                            isSelected
+                              ? 'bg-blue-50/40 dark:bg-blue-950/20'
+                              : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <td className="py-3 px-3.5">
+                            <button
+                              type="button"
+                              onClick={() => onSelectSummary(item.id)}
+                              className="text-left group block max-w-[230px]"
+                              title="View batch summary"
+                            >
+                              <div className="font-medium text-slate-900 dark:text-slate-100 group-hover:text-blue-700 dark:group-hover:text-blue-400 truncate transition-colors">
+                                {item.fileName}
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                                {item.stats.totalWords.toLocaleString()} words ·{' '}
+                                {formatReadingTime(item.stats.totalWords)} ·{' '}
+                                {item.stats.figuresExtracted}{' '}
+                                {item.stats.figuresExtracted === 1 ? 'fig' : 'figs'} ·{' '}
+                                {item.createdAt}
+                              </div>
+                            </button>
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                            {item.sourcePagesProcessed}→{item.outputPages}
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                            {formatBytes(item.fileSizeBytes)}
+                          </td>
+                          <td className="py-3 px-3.5 text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => onSelectSummary(item.id)}
+                                className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                                  isSelected
+                                    ? 'text-blue-700 dark:text-blue-400'
+                                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                                }`}
+                              >
+                                Summary
+                              </button>
+                              <a
+                                href={item.downloadUrl}
+                                download={item.fileName}
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                              >
+                                <Download className="w-3 h-3" />
+                                Save
+                              </a>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
